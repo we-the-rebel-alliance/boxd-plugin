@@ -70,8 +70,10 @@ None.
   whole life when it closes. A day event says `cost:<YYYY-MM-DD>`, `running-seconds:<n>`, `asleep-seconds:<n>`,
   `amount:<amount>`, `currency:<code>` and `rates:<usage or public>`; a life event says `cost:life` with the same labels.
   A cost event keeps `from` equal to `to`, so it never looks like a phase change. The record keeps the last day it
-  reported, so a restart, a second OpenCode process on one ledger or a missed sweep writes no day twice. Read them with
-  `events_list` and its cursor; no boxd call and no machine is woken.
+  reported, so a restart, a second OpenCode process on one ledger or a missed sweep writes no day twice. The record's
+  `product`, `role`, `feature` and `task` labels travel on the event when it holds them, so an automation can sum a
+  product's day from the events alone. Read them with `events_list` and its cursor; no boxd call and no machine is
+  woken.
 - **Machines against the limit.** The `/boxd` report counts the organisation's machines against boxd's limit from the
   all-region listing and the machine limit the fleet read already takes, with no usage read and no owner's sign-in. Its
   `Machines:` line reads, for example, `1,180 of 1,250 in use (40 running, 12 standby, 1,128 hibernated); 31 are this
@@ -93,6 +95,14 @@ None.
   `reassign` moves an unstarted work's machine to a new id; `golden` builds, lists or prunes golden images, and with
   `repo`, one of the plugin option `warm` repositories, it builds that repository's warm image from its version's image,
   with the repository's checkout and setup script. Every one of them emits `changed`.
+- **Labels.** `ensure` takes `labels`, an object with any of `product`, `role`, `feature` and `task`, each a boxd label
+  value. `product` is the product a work serves; `role` is what it does for the feature, such as `lane` or `review`;
+  `feature` is the feature it serves, as a tracker reference such as `boxd-plugin/59`; and `task` is the task it does,
+  such as `boxd-plugin/130`. An ensure that passes labels replaces them; one that omits them keeps the recorded ones. A
+  work on its own machine carries them as the boxd labels `work.product`, `work.role`, `work.feature` and `work.task`;
+  a slot on a shared machine records them in the ledger only. A rebuild through `boxd_resume` keeps them on the new
+  machine. `boxd_job` and the status works list return them, and an adopted orphan's `work.*` labels are read back into
+  its record.
 - **Orphans.** The fleet status classifies every machine as a work here, another ledger's work, kept by a `keep` selector,
   a golden builder, or an orphan with its reason and whether the plugin may act on it. `ensure` with
   `{ select: "orphans" }` adopts every actionable orphan: it reads the guest's `describe`, writes a record and sets this

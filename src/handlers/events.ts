@@ -39,7 +39,7 @@ import type { MachineIdentity } from "../accounts.js"
 import { ownerOf } from "../accounts.js"
 import type { CallContext } from "../call.js"
 import { BoxdError } from "../errors.js"
-import type { LedgerPort, OpContext, WorkEvent } from "../ports.js"
+import { WORK_LABEL_KEYS, type LedgerPort, type OpContext, type WorkEvent } from "../ports.js"
 import { PROBE_INPUT } from "./schemas.js"
 
 /** The source every event names. */
@@ -175,6 +175,10 @@ export function eventOf(event: WorkEvent): SourceEvent {
             `rates:${event.cost.ratesSource}`,
           ]
         : []),
+      ...WORK_LABEL_KEYS.flatMap((key) => {
+        const value = event.labels?.[key]
+        return value ? [`${key}:${value}`] : []
+      }),
       `phase:${event.to}`,
       ...(event.outcome ? [`outcome:${event.outcome}`] : []),
       ...(event.code ? [`code:${event.code}`] : []),

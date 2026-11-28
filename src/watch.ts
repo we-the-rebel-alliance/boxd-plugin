@@ -333,8 +333,9 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
   /** Appends one cost event, once for its day or life: 1 when it was written, 0 when not. Never throws. */
   async function appendCost(record: WorkRecord, cost: WorkEventCost, op: OpContext, at = now().toISOString()): Promise<number> {
     const phase = record.state === "closed" ? "closed" : (logged.get(record.workId)?.phase ?? record.hours?.phase ?? phaseNow(record))
+    const labels = record.labels && Object.keys(record.labels).length > 0 ? { labels: record.labels } : {}
     try {
-      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost }, cost.day === "life" ? "life" : "day", cost.day, op)
+      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost, ...labels }, cost.day === "life" ? "life" : "day", cost.day, op)
       return 1
     } catch (error) {
       if (!abort.signal.aborted) core.report("watch", `The watcher could not write ${record.workId}'s cost event: ${reasonOf(error)}.`)
@@ -591,6 +592,7 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
           region: record.region,
           machineId: record.machineId,
           size: record.size,
+          ...(record.labels && Object.keys(record.labels).length > 0 ? { labels: record.labels } : {}),
           phase,
           outcome: outcomeOf(record, obs),
           saved: core.ledger.saved(record),
