@@ -38,7 +38,11 @@ of:
 - a work in another ledger, when its `ledger=` label names another ledger;
 - kept, when it matches a selector in `keep`;
 - a golden builder;
+- the registry, when its `role` label is `registry`;
 - an orphan.
+
+The registry machine is not counted against `budget.machines`: the cap counts this ledger's works, not the copy that
+lets them survive this machine. It is never an orphan, and the plugin never adopts it.
 
 `/boxd` lists each orphan with its region, status and why: no `ledger` label, this ledger's label with no record, or
 the plugin's legacy labels only. Only a session machine is actionable. Any other orphan is left alone, with the next

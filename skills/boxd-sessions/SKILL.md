@@ -73,6 +73,20 @@ woken for the read and left running. An orphan whose `describe` fails is skipped
 label selectors (`key=value`, or a bare key) for machines owned elsewhere, so they are never listed as orphans of this
 ledger.
 
+## Rebuild an operator
+
+A ledger keeps a durable copy on its registry machine, `oc-reg-<ledgerId>`, so an operator rebuilt from scratch can
+recover it:
+
+1. Sign in with `boxd auth login`.
+2. Install the plugin from a release tag, as the README says, and load this skill.
+3. Run `tools.boxd.ensure({ select: "registry", dryRun: true })` and read what it would restore and adopt. With more
+   than one registry machine, pass `ledger: "<id>"`; an ambiguous choice is refused with the list.
+4. Run `tools.boxd.ensure({ select: "registry" })` without `dryRun` on the empty ledger. It restores the records,
+   exports and patches from the registry machine, takes its id as this ledger's id, and adopts the works made after the
+   last copy.
+5. Run `/boxd` and read the works list: every work the old operator had is there.
+
 ## Account and access
 
 There is no plugin-held account: sign in with the boxd CLI, and `probe` reports this machine's local identity. No `account`

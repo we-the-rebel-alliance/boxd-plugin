@@ -67,6 +67,20 @@ describe("the boxd-sessions skill", () => {
     expect(capabilities).toContain("outcome: completed")
   })
 
+  test("teaches the registry and the operator rebuild", () => {
+    const read = (path: string) => readFileSync(join(ROOT, path), "utf8")
+    const architecture = read("docs/architecture.md")
+    expect(architecture).toContain("oc-reg-<ledgerId>")
+    expect(architecture).toContain("backups.period 24h")
+    expect(read("docs/configuration.md")).toContain("not counted against `budget.machines`")
+    expect(read("docs/capabilities.md")).toContain('select: "registry"')
+    const security = read("docs/security.md")
+    expect(security).toContain("transcripts")
+    expect(security).toContain("private to the operator")
+    const text = readSkills()[0]!.content
+    for (const phrase of ["boxd auth login", 'select: "registry", dryRun: true', 'select: "registry"', "`/boxd`"]) expect(text).toContain(phrase)
+  })
+
   test("states the account, the access levels and the error form", () => {
     const text = readSkills()[0]!.content
     for (const phrase of ["no plugin-held account", "`all`", "`ask-changes`", "`read-only`", "CODE: What happened. Next step: What to do."]) expect(text).toContain(phrase)
