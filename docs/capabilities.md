@@ -52,13 +52,22 @@ None.
   `asleep` or `closed`, carries no `change:` label. The existing `phase:`, `outcome:`, `needs:` and `done` labels stay.
 - **The works list.** `status` with `{ list: "works" }` answers the `boxd.works.list` snapshot: at most 50 works, newest
   activity first, as the contract's `list` output.
-- **Machine-hours.** Each work's record carries the time its machine existed and the time it ran, in seconds, counted by
+- **Machine-hours.** Each work's record carries the time its machine existed, ran and was asleep, in seconds, counted by
   the ledger at every phase change from the record's last change: every phase but `gone` and `closed` adds to
-  `existedSeconds`, and the running phases add to `runningSeconds`. `boxd_status` with `include: ["cost"]` shows
-  `hours: { existed, running }` on each work row beside the money figures, and `boxd_job` shows the same on every answer.
-  The cost block sums them for this ledger, for today from local midnight, and since the oldest open work was created.
-  The hours are computed from the ledger alone, so they show without an owner's sign-in; the money figures stay `null`
-  without one.
+  `existedSeconds`, the running phases add to `runningSeconds`, and `asleep` adds to `asleepSeconds`. Each interval is
+  priced at the rates current when it is counted, into `cost` and `todayCost`; a slot work is charged its share of the
+  shared machine. `boxd_status` with `include: ["cost"]` shows `hours: { existed, running }` on each work row beside the
+  money figures, and `boxd_job` shows the same on every answer. The cost block sums them for this ledger, for today from
+  local midnight, and since the oldest open work was created. The hours are computed from the ledger alone, so they show
+  without an owner's sign-in; the money figures stay `null` without one.
+- **Cost events.** The works source appends one cost event for each work for every local day that ended, and one for its
+  whole life when it closes. A day event says `cost:<YYYY-MM-DD>`, `running-seconds:<n>`, `asleep-seconds:<n>`,
+  `amount:<amount>`, `currency:<code>` and `rates:<usage or public>`; a life event says `cost:life` with the same labels.
+  A cost event keeps `from` equal to `to`, so it never looks like a phase change. The record keeps the last day it
+  reported, so a restart, a second OpenCode process on one ledger or a missed sweep writes no day twice. When the record
+  holds the labels from `ensure`, the event also carries `product:<value>`, `role:<value>`, `feature:<value>` and
+  `task:<value>`, so an automation can sum a product's day from the events alone. Read them with `events_list` and its
+  cursor; no boxd call and no machine is woken.
 - **Machines against the limit.** The `/boxd` report counts the organisation's machines against boxd's limit from the
   all-region listing and the machine limit the fleet read already takes, with no usage read and no owner's sign-in. Its
   `Machines:` line reads, for example, `1,180 of 1,250 in use (40 running, 12 standby, 1,128 hibernated); 31 are this

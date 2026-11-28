@@ -13,7 +13,8 @@ import { assertHost, register } from "@we-the-rebel-alliance/plugin-contract/reg
 import { machineIdentity } from "./accounts.js"
 import { startAutomation } from "./automation.js"
 import { PLUGIN_ID } from "./constants.js"
-import { createCost } from "./cost/index.js"
+import { createCost, internalsOf } from "./cost/index.js"
+import { PUBLIC_RATES } from "./cost/rates.js"
 import { fleetStatus } from "./fleet/status.js"
 import { createHandlers } from "./handlers/index.js"
 import { createRuns } from "./handlers/runs.js"
@@ -24,6 +25,7 @@ import { checkHost } from "./host-version.js"
 import { createLedger } from "./ledger/index.js"
 import { manifest, VERSION } from "./manifest.js"
 import { parseOptions } from "./options.js"
+import type { Rates } from "./ports.js"
 import { createProvider, type ProviderOptions } from "./provider/index.js"
 import { stopAll, type CoreServices, type CostServices, type Dispose, type FleetServices, type HostServices } from "./services.js"
 import { readSkills, registerSkills } from "./skills.js"
@@ -71,11 +73,16 @@ export function createBoxdPlugin(seam: BoxdSeam = {}) {
         report,
       }
       const provider = createProvider({ boxdBin: seam.boxdBin, opencodeBin: seam.opencodeBin, helperPath: seam.helperPath })
-      const core: CoreServices = { ...hostServices, ...provider, ledger: createLedger({ ...hostServices, ...provider }) }
+      // The ledger prices each interval at the rates the cost service knows; the cost service is built after the
+      // watcher, so the closure reads the latest function once it exists.
+      let ratesOf: () => Rates = () => PUBLIC_RATES.EUR
+      const core: CoreServices = { ...hostServices, ...provider, ledger: createLedger({ ...hostServices, ...provider }, { rates: () => ratesOf() }) }
       // The watcher starts before the one registration exists, so its nudge is wired to the bus just after it.
       let nudge: (() => Promise<void>) | undefined
-      const watcher = createWatch(core, { changed: () => nudge?.() })
-      const fleet: FleetServices = { ...core, watch: watcher.watch, cost: createCost({ ...core, watch: watcher.watch }) }
+      const watcher = createWatch(core, { changed: () => nudge?.(), rates: () => ratesOf() })
+      const fleetCost = createCost({ ...core, watch: watcher.watch })
+      ratesOf = internalsOf(fleetCost).rates
+      const fleet: FleetServices = { ...core, watch: watcher.watch, cost: fleetCost }
       const source: SourceDeps = { ledger: core.ledger, identity: machineIdentity, now: () => hostServices.clock.now() }
       const { runs, selectors, actions } = createRuns(fleet)
       const cost: CostServices = { ...fleet, actions }

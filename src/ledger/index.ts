@@ -4,12 +4,12 @@
  *
  * Every write is copy-on-write (temp, verify, fsync, rename), except the append-only `events.jsonl`.
  */
-import type { EventPage, LedgerPort } from "../ports.js"
+import type { EventPage, LedgerPort, Rates } from "../ports.js"
 import type { HostServices, Provider } from "../services.js"
 import { Ledger, savedState } from "./store.js"
 
-export function createLedger(core: HostServices & Provider): LedgerPort {
-  const store = new Ledger(core.ledgerRoot, { now: () => core.clock.now() })
+export function createLedger(core: HostServices & Provider, options: { readonly rates?: () => Rates } = {}): LedgerPort {
+  const store = new Ledger(core.ledgerRoot, { now: () => core.clock.now(), ...(options.rates ? { rates: options.rates } : {}) })
   return ledgerPort(store)
 }
 
@@ -49,11 +49,12 @@ export function ledgerPort(store: Ledger): LedgerPort {
     async appendEvent(event, context) {
       // Count the interval before the event lands: if the append fails, the record is already counted to this phase,
       // so the next event counts from here and no second is counted twice.
-      await store.countPhase(event.workId, event.to, new Date(event.at), context.signal)
+      await store.countPhase(event.workId, event.to, new Date(event.at), context.signal, event.reading)
       const line = await store.events.append(event, context.signal)
       await store.setPhase(line.workId, line.to)
       return line
     },
+    appendEventOnce: (event, claim, key, context) => store.appendEventOnce(event, claim, key, context.signal),
     eventsSince: (cursor, _context): Promise<EventPage> => store.events.since(cursor),
     workFolder: (workId) => store.workDir(workId),
     stageFile: (workId, final, _context) => store.stageFile(workId, final),

@@ -13,16 +13,21 @@
  * - **A phase change is appended** to `events.jsonl` (`unreachable` after two failed reads in a row, `gone` after two
  *   listings in a row without the machine), handed to every subscriber in `seq` order, and queued as a notice; the
  *   queue's durable cursor per coordinator (`src/notice-cursors.ts`) keeps each change to one delivery.
+ * - **A cost event is appended once** for each local day that ended, from the ledger's counters, and once for a work's
+ *   whole life when it closes. It carries one `cost` object and keeps `from` equal to `to`; subscribers and notices see
+ *   only phase changes, while `events_list` reads the figures.
  * - **It stops** sweeping when nothing is busy, when the plugin is disposed, and after three failed sweeps in a row
  *   (`boxd_status`'s `health.watcher` says why; the next status call starts it again).
  */
 import { statSync } from "node:fs"
 import { join } from "node:path"
-import { LEDGER_PATHS, type Phase, type WorkRecord } from "./ledger/types.js"
+import { PUBLIC_RATES } from "./cost/rates.js"
+import { endedDays, hoursAt, localDay } from "./ledger/hours.js"
+import { LEDGER_PATHS, type CostSeconds, type Phase, type WorkRecord } from "./ledger/types.js"
 import { base, codeOf, notRead, observe, observeFailure, outcomeOf, phaseOf, promptedSince, readGuest, recordPhase, STATUS_TEXT_LIMIT, wantsRead, type Observed } from "./fleet/model.js"
 import { FileNoticeCursors } from "./notice-cursors.js"
 import { checkTarget, NoticeQueue, type DroppedNotice, type GoneCause } from "./notices.js"
-import type { DoneReport, FleetSnapshot, FleetWatch, Listing, OpContext, WorkEvent, WorkSnapshot } from "./ports.js"
+import type { DoneReport, FleetSnapshot, FleetWatch, Listing, OpContext, Rates, WorkEvent, WorkEventCost, WorkSnapshot } from "./ports.js"
 import { TIMEOUTS } from "./ports.js"
 import { reasonOf } from "./redact.js"
 import type { CoreServices, Dispose } from "./services.js"
@@ -60,6 +65,8 @@ export interface WatchOptions {
   /** Start the timer at once (the plugin) or not (tests, which call `tick`). */
   readonly autoStart?: boolean
   readonly intervalMs?: number
+  /** The rates a cost event prices its figures at; boxd's public EUR rates when absent. */
+  readonly rates?: () => Rates
   /** Called when a work becomes done: the plugin nudges the works source with the contract's `changed`. */
   readonly changed?: (workId: string) => void | Promise<void>
 }
@@ -80,6 +87,7 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
   const auto = options.autoStart ?? true
   const interval = options.intervalMs ?? WATCH_INTERVAL_MS
   const now = () => core.clock.now()
+  const rates = (): Rates => options.rates?.() ?? PUBLIC_RATES.EUR
   const observed = new Map<string, Observed>()
   /** The last phase the event log holds per work, and when. */
   /** `seenAt` is when this process learned it (`Date.now()`, the listing's clock). */
@@ -210,6 +218,9 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
     const page = await core.ledger.eventsSince(cursor, op)
     for (const event of page.events) {
       if (event.seq <= cursor || dispatched.has(event.seq)) continue
+      // A cost event is a figure for `events_list`, not a phase change: the watcher's subscribers and notices see only
+      // the changes they act on.
+      if (event.cost) continue
       learn(event)
       // A work a change tool just closed has left the open list: its record still names its coordinator.
       const record = records.get(event.workId) ?? (await core.ledger.get(event.workId, op).catch(() => undefined))
@@ -277,6 +288,70 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
       await options.changed?.(record.workId)
     } catch (error) {
       core.report("watch", `The changed nudge for ${record.workId} failed: ${reasonOf(error)}.`)
+    }
+  }
+
+  /** The local day before `at`. */
+  function dayBefore(at: Date): string {
+    const before = new Date(at)
+    before.setDate(before.getDate() - 1)
+    return localDay(before)
+  }
+
+  /** Appends one cost event, once for its day or life. Never throws. */
+  async function appendCost(record: WorkRecord, cost: WorkEventCost, op: OpContext, at = now().toISOString()): Promise<void> {
+    const phase = record.state === "closed" ? "closed" : (logged.get(record.workId)?.phase ?? record.hours?.phase ?? phaseNow(record))
+    const labels = record.labels && Object.keys(record.labels).length ? { labels: record.labels } : {}
+    try {
+      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost, ...labels }, cost.day === "life" ? "life" : "day", cost.day, op)
+    } catch (error) {
+      if (!abort.signal.aborted) core.report("watch", `The watcher could not write ${record.workId}'s cost event: ${reasonOf(error)}.`)
+    }
+  }
+
+  /**
+   * Writes the cost events that are due: one per open work for the local day that ended, from the counters the ledger
+   * kept, and one life event for each closed work. A record whose day or life is already written writes nothing, so a
+   * restart or a second watcher adds no duplicate.
+   */
+  async function reportCosts(open: readonly WorkRecord[], closed: readonly WorkRecord[], op: OpContext): Promise<void> {
+    const at = now()
+    const today = localDay(at)
+    const rate = rates()
+    for (const record of open) {
+      if (record.hours) {
+        const reading = observed.get(record.workId)?.reading
+        const pricing = { rates: rate, size: record.size, ...(reading ? { reading } : {}) }
+        const days = new Map<string, WorkEventCost>()
+        for (const day of endedDays(record.hours, at, pricing)) days.set(day.day, day)
+        const last = hoursAt(record, at, pricing).lastDay
+        if (last && !days.has(last.day)) days.set(last.day, last)
+        const created = localDay(new Date(record.createdAt))
+        for (const day of [...days.values()].filter((day) => day.day < today && day.day >= created).sort((a, b) => a.day.localeCompare(b.day))) {
+          await appendCost(record, day, op)
+        }
+        continue
+      }
+      // A work recorded before midnight with no phase change yet still existed: report a day of no machine time.
+      const created = Date.parse(record.createdAt)
+      if (Number.isNaN(created) || localDay(new Date(created)) >= today) continue
+      const day = dayBefore(at)
+      if (record.costDay !== undefined && day <= record.costDay) continue
+      const seconds: CostSeconds = { existed: 0, running: 0, asleep: 0 }
+      await appendCost(record, { day, seconds, amount: 0, currency: rate.currency, ratesSource: rate.source }, op)
+    }
+    for (const record of closed) {
+      if (record.costLife) continue
+      const hours = hoursAt(record, at, { rates: rate, size: record.size })
+      const seconds: CostSeconds = { existed: hours.existedSeconds, running: hours.runningSeconds, asleep: hours.asleepSeconds ?? 0 }
+      const cost: WorkEventCost = {
+        day: "life",
+        seconds,
+        amount: hours.cost ?? 0,
+        currency: hours.currency ?? rate.currency,
+        ratesSource: hours.ratesSource ?? rate.source,
+      }
+      await appendCost(record, cost, op, record.closed?.at ?? at.toISOString())
     }
   }
 
@@ -392,12 +467,15 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
     const run = (async () => {
       const op = context()
       try {
-        const list = await core.ledger.list({}, op)
+        const all = await core.ledger.list({ closed: true }, op)
+        const closed = all.filter((record) => record.state === "closed" || record.hours?.phase === "closed")
+        const list = all.filter((record) => record.state === "open" && record.hours?.phase !== "closed")
         for (const id of [...records.keys()]) if (!list.some((record) => record.workId === id)) records.delete(id)
         for (const record of list) records.set(record.workId, record)
         clearOrphans()
         await sync(op)
-        const open = list.filter((record) => record.state === "open")
+        const open = list
+        await reportCosts(open, closed, op)
         if (!(auto && stopped) && wantsSweep(open)) {
           notices.hold()
           try {

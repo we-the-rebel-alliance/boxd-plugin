@@ -2,8 +2,9 @@
 // so creating, busy, idle and unreachable count as running, asleep counts as existing only, and gone or closed add
 // neither. A restart, or a change missed while OpenCode was closed, counts from the record's last change and never twice.
 import { afterEach, describe, expect, test } from "bun:test"
+import { PUBLIC_RATES, money, perHour } from "../../src/cost/rates.js"
 import { ledgerPort } from "../../src/ledger/index.js"
-import { asHours, hoursAt, localDay, shownHours } from "../../src/ledger/hours.js"
+import { asHours, countHours, hoursAt, localDay, shownHours } from "../../src/ledger/hours.js"
 import { Ledger } from "../../src/ledger/store.js"
 import type { Phase, WorkRecord } from "../../src/ledger/types.js"
 import type { MachineId } from "../../src/ports.js"
@@ -107,5 +108,66 @@ describe("the ledger's machine-hours", () => {
     await change("asleep", "gone")
     const hours = (await ledger.get("day"))!.hours!
     expect(hours).toMatchObject({ existedSeconds: 70 * 60, runningSeconds: 40 * 60, todayExistedSeconds: 40 * 60, todayRunningSeconds: 10 * 60 })
+  })
+
+  test("prices each interval at its rates: asleep is its own counter, midnight splits the day, and a currency change starts again", () => {
+    const rates = PUBLIC_RATES.EUR
+    const size = "2x8" as const
+    const reading = { residentGiB: 2, load1: 1 }
+    const busy = perHour("busy", size, reading, rates)
+    const asleep = perHour("asleep", size, reading, rates)
+    const start = new Date(2026, 10, 16, 23, 30, 0)
+    const pricing = { rates, size, reading }
+
+    let hours = countHours(undefined, "creating", start, pricing)
+    expect(hours).toMatchObject({ cost: 0, todayCost: 0, asleepSeconds: 0 })
+    hours = countHours(hours, "busy", new Date(2026, 10, 16, 23, 50, 0), pricing)
+    hours = countHours(hours, "idle", new Date(2026, 10, 17, 0, 10, 0), pricing)
+    expect(hours).toMatchObject({
+      existedSeconds: 40 * 60,
+      runningSeconds: 40 * 60,
+      asleepSeconds: 0,
+      todayExistedSeconds: 10 * 60,
+      todayRunningSeconds: 10 * 60,
+      todayAsleepSeconds: 0,
+      day: localDay(new Date(2026, 10, 17, 0, 10, 0)),
+      phase: "idle",
+    })
+    // The day that ended keeps 23:30 to midnight: twenty minutes creating and ten busy.
+    expect(hours.lastDay).toMatchObject({
+      day: localDay(new Date(2026, 10, 16, 23, 30, 0)),
+      seconds: { existed: 30 * 60, running: 30 * 60, asleep: 0 },
+      currency: "EUR",
+      ratesSource: "public",
+    })
+    expect(hours.lastDay?.amount).toBeCloseTo(money(busy * 0.5), 3)
+    expect(hours.cost).toBeCloseTo((busy * 40) / 60, 3)
+    expect(hours.todayCost).toBeCloseTo((busy * 10) / 60, 3)
+
+    hours = countHours(hours, "asleep", new Date(2026, 10, 17, 0, 40, 0), pricing)
+    hours = countHours(hours, "gone", new Date(2026, 10, 17, 1, 10, 0), pricing)
+    expect(hours).toMatchObject({
+      existedSeconds: 100 * 60,
+      runningSeconds: 70 * 60,
+      asleepSeconds: 30 * 60,
+      todayExistedSeconds: 70 * 60,
+      todayRunningSeconds: 40 * 60,
+      todayAsleepSeconds: 30 * 60,
+    })
+    expect(hours.cost).toBeCloseTo((busy * 70) / 60 + (asleep * 30) / 60, 3)
+    expect(hours.todayCost).toBeCloseTo((busy * 40) / 60 + (asleep * 30) / 60, 3)
+    expect(hours.lastDay?.day).toBe(localDay(new Date(2026, 10, 16, 23, 30, 0)))
+
+    // A different currency starts the money counters again, today's included, rather than adding two currencies.
+    hours = countHours(hours, "idle", new Date(2026, 10, 17, 1, 20, 0), pricing)
+    const usd = { ...PUBLIC_RATES.USD, source: "usage" as const }
+    const after = countHours(hours, "busy", new Date(2026, 10, 17, 1, 40, 0), { rates: usd, size, reading })
+    const idle = perHour("idle", size, reading, usd)
+    expect(after).toMatchObject({
+      cost: money((idle * 20) / 60),
+      todayCost: money((idle * 20) / 60),
+      currency: "USD",
+      ratesSource: "usage",
+    })
   })
 })

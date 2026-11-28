@@ -81,6 +81,11 @@ it. Drop only finished, saved work. The plugin's automation harvests and hiberna
 `tools.boxd.job({ cost: true })` or `/boxd`, never from a hook. Each answer also carries the work's machine-hours from the
 ledger, which need no owner's sign-in: `hours.existed` and `hours.running`.
 
+The works source also carries the figures as cost events: one for each local day that ended and one `cost:life` when the
+work closes. Pass the labels `product`, `role`, `feature` and `task` to `ensure` when the work belongs to one, so a cost
+event also says `product:<value>` and the rest; an automation can then sum a product's day from `events_list` alone,
+without reading status on a timer.
+
 A `budget` may cap today's machine cost (`daily`) and today's running hours for this ledger's works (`machineHours`).
 With `action: "refuse"`, a call that would make a machine run answers `BUDGET_EXCEEDED` when either cap is reached;
 with `"warn"`, the call runs and `tools.boxd.status` carries `BUDGET_WARN`. The hours come from the ledger, so they work

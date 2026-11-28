@@ -14,9 +14,10 @@ import { randomBytes } from "node:crypto"
 import { link, lstat, mkdir, open, readdir, readFile, rename, rmdir, stat, unlink } from "node:fs/promises"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { boxdError, BoxdError } from "../errors.js"
+import { PUBLIC_RATES } from "../cost/rates.js"
 import { EventLog } from "./events.js"
 import { countHours } from "./hours.js"
-import type { Expected, LedgerFile, StagedFile, StagedFolder } from "../ports.js"
+import type { Expected, LedgerFile, Rates, Reading, StagedFile, StagedFolder, WorkEvent } from "../ports.js"
 import { commitFile, copyFileAtomic, type Digest, digestFile, ensureDir, errnoOf, exists, FILE_MODE, fsyncDir, randomPart, remove, tempBeside, writeFileAtomic, writeJsonAtomic } from "./fsx.js"
 import { alive, LockSet, type LockHandle } from "./lock.js"
 import {
@@ -76,6 +77,8 @@ export interface LedgerOptions {
   readonly lockWaitMs?: number
   /** Rotation size for the event log; tests make it small. */
   readonly eventsRotateBytes?: number
+  /** The rates each interval is priced at; boxd's public EUR rates when absent. */
+  readonly rates?: () => Rates
   /** The locks' timing; tests make the heartbeat fast. */
   readonly lock?: { readonly heartbeatMs?: number; readonly staleMs?: number }
 }
@@ -90,6 +93,7 @@ export class Ledger {
   /** Every lock this ledger holds, for `dispose`. */
   readonly locks = new LockSet()
   private readonly lockTiming: { readonly heartbeatMs?: number; readonly staleMs?: number }
+  private readonly rates: () => Rates
   private readonly cache = new Map<string, Cached>()
   private indexLoaded = false
   private ledgerId: string | undefined
@@ -103,6 +107,7 @@ export class Ledger {
     this.dir = join(root, LEDGER_PATHS.v1)
     this.lockWaitMs = options.lockWaitMs ?? WORK_LOCK_WAIT_MS
     this.lockTiming = options.lock ?? {}
+    this.rates = options.rates ?? (() => PUBLIC_RATES.EUR)
     this.events = new EventLog(this.dir, {
       locks: this.locks,
       ...(options.now ? { now: options.now } : {}),
@@ -333,18 +338,57 @@ export class Ledger {
 
   /**
    * Counts one phase change into the work's record, under its lock: the interval since the record's last change goes to
-   * the phase that was current before (design §C.4). A work with no record, or an event at the same instant and phase,
-   * writes nothing.
+   * the phase that was current before (design §C.4), priced at the rates and with the reading the interval had. A work
+   * with no record, or an event at the same instant and phase, writes nothing. A slot work is charged its share of the
+   * shared machine, so the slot works on one machine add up to that machine once.
    */
-  async countPhase(workId: string, phase: Phase, at: Date, signal?: AbortSignal): Promise<void> {
+  async countPhase(workId: string, phase: Phase, at: Date, signal?: AbortSignal, reading?: Reading): Promise<void> {
     await this.withWork(
       workId,
       async () => {
         const record = await this.get(workId)
         if (!record) return
-        const hours = countHours(record.hours, phase, at)
+        const share = record.slot ? await this.slotShare(record) : 1
+        const hours = countHours(record.hours, phase, at, { rates: this.rates(), size: record.size, ...(reading ? { reading } : {}), share })
         if (record.hours && record.hours.phase === hours.phase && record.hours.at === hours.at) return
         await this.write(workId, { ...record, hours })
+      },
+      signal,
+    )
+  }
+
+  /** The share one slot work is charged: the open works on its machine at this moment. */
+  private async slotShare(record: WorkRecord): Promise<number> {
+    if (!record.machineId) return 1
+    const open = await this.list({})
+    const peers = open.filter((item) => item.state === "open" && item.machineId === record.machineId).length
+    return peers > 0 ? 1 / peers : 1
+  }
+
+  /**
+   * Appends a cost event once, under the work's lock. The marker is written first and rolled back if the append fails,
+   * so two watchers on one ledger, or a restart after an interrupted tick, never write a day or a life twice.
+   */
+  async appendEventOnce(event: Omit<WorkEvent, "seq">, claim: "day" | "life", key: string, signal?: AbortSignal): Promise<WorkEvent | undefined> {
+    const workId = event.workId
+    return this.withWork(
+      workId,
+      async () => {
+        const record = await this.get(workId)
+        if (!record) return undefined
+        if (claim === "day") {
+          if (record.costDay !== undefined && key <= record.costDay) return undefined
+        } else if (record.costLife) {
+          return undefined
+        }
+        const marked: WorkRecord = claim === "day" ? { ...record, costDay: key } : { ...record, costLife: true }
+        await this.write(workId, marked)
+        try {
+          return await this.events.append(event, signal)
+        } catch (error) {
+          await this.write(workId, record).catch(() => undefined)
+          throw error
+        }
       },
       signal,
     )
