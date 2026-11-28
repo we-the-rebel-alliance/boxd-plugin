@@ -711,7 +711,8 @@ export interface WorkEventCost extends MeteredDay {
 }
 
 /**
- * One phase change: **the one event shape.** The ledger appends it to `events.jsonl` as one JSON line (`EventLine` is
+ * One change: **the one event shape.** It is a phase change, or a wait for input that starts or clears while the phase
+ * stays the same (`from` then equals `to`). The ledger appends it to `events.jsonl` as one JSON line (`EventLine` is
  * this type), assigning `seq`; the watcher's subscribers get the same object, with the same `seq`, after the append.
  * `seq` is `boxd_status`'s cursor: strictly increasing, never reused, kept across rotation.
  */
@@ -781,7 +782,7 @@ export interface FleetSnapshot {
 
 /** The watcher's face to other packages: its events, and the fleet as it last saw it. */
 export interface FleetWatch {
-  /** Calls `listener` for every phase change after the ledger appended it, in `seq` order; returns the unsubscribe. */
+  /** Calls `listener` for every change after the ledger appended it, in `seq` order; returns the unsubscribe. */
   subscribe(listener: (event: WorkEvent) => void): () => void
   snapshot(): FleetSnapshot
   /**
