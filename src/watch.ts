@@ -24,8 +24,9 @@
  */
 import { statSync } from "node:fs"
 import { join } from "node:path"
+import { endedDays } from "./cost/days.js"
 import { PUBLIC_RATES } from "./cost/rates.js"
-import { endedDays, hoursAt, localDay } from "./ledger/hours.js"
+import { hoursAt, localDay } from "./ledger/hours.js"
 import { LEDGER_PATHS, type CostSeconds, type Phase, type WorkRecord } from "./ledger/types.js"
 import { base, codeOf, notRead, observe, observeFailure, outcomeOf, phaseOf, promptedSince, readGuest, recordPhase, STATUS_TEXT_LIMIT, wantsRead, type Observed } from "./fleet/model.js"
 import { FileNoticeCursors } from "./notice-cursors.js"
@@ -332,9 +333,8 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
   /** Appends one cost event, once for its day or life: 1 when it was written, 0 when not. Never throws. */
   async function appendCost(record: WorkRecord, cost: WorkEventCost, op: OpContext, at = now().toISOString()): Promise<number> {
     const phase = record.state === "closed" ? "closed" : (logged.get(record.workId)?.phase ?? record.hours?.phase ?? phaseNow(record))
-    const labels = record.labels && Object.keys(record.labels).length ? { labels: record.labels } : {}
     try {
-      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost, ...labels }, cost.day === "life" ? "life" : "day", cost.day, op)
+      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost }, cost.day === "life" ? "life" : "day", cost.day, op)
       return 1
     } catch (error) {
       if (!abort.signal.aborted) core.report("watch", `The watcher could not write ${record.workId}'s cost event: ${reasonOf(error)}.`)
@@ -356,12 +356,9 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
       if (record.hours) {
         const reading = observed.get(record.workId)?.reading
         const pricing = { rates: rate, size: record.size, ...(reading ? { reading } : {}) }
-        const days = new Map<string, WorkEventCost>()
-        for (const day of endedDays(record.hours, at, pricing)) days.set(day.day, day)
-        const last = hoursAt(record, at, pricing).lastDay
-        if (last && !days.has(last.day)) days.set(last.day, last)
+        const days = endedDays(record.hours, at, pricing)
         const created = localDay(new Date(record.createdAt))
-        for (const day of [...days.values()].filter((day) => day.day < today && day.day >= created).sort((a, b) => a.day.localeCompare(b.day))) {
+        for (const day of days.filter((entry) => entry.day < today && entry.day >= created).sort((a, b) => a.day.localeCompare(b.day))) {
           wrote += await appendCost(record, day, op)
         }
         continue
@@ -376,7 +373,7 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
     }
     for (const record of closed) {
       if (record.costLife) continue
-      const hours = hoursAt(record, at, { rates: rate, size: record.size })
+      const hours = hoursAt(record, at, rate)
       const seconds: CostSeconds = { existed: hours.existedSeconds, running: hours.runningSeconds, asleep: hours.asleepSeconds ?? 0 }
       const cost: WorkEventCost = {
         day: "life",

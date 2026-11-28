@@ -13,11 +13,11 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes } from "node:crypto"
 import { link, lstat, mkdir, open, readdir, readFile, rename, rmdir, stat, unlink } from "node:fs/promises"
 import { basename, dirname, join, resolve, sep } from "node:path"
-import { boxdError, BoxdError } from "../errors.js"
 import { PUBLIC_RATES } from "../cost/rates.js"
+import { boxdError, BoxdError } from "../errors.js"
 import { EventLog } from "./events.js"
 import { countHours } from "./hours.js"
-import type { Expected, LedgerFile, Rates, Reading, StagedFile, StagedFolder, WorkEvent } from "../ports.js"
+import type { Expected, LedgerFile, MachineName, Rates, Reading, Region, StagedFile, StagedFolder, WorkEvent } from "../ports.js"
 import { commitFile, copyFileAtomic, type Digest, digestFile, ensureDir, errnoOf, exists, FILE_MODE, fsyncDir, randomPart, remove, tempBeside, writeFileAtomic, writeJsonAtomic } from "./fsx.js"
 import { alive, LockSet, type LockHandle } from "./lock.js"
 import {
@@ -77,7 +77,7 @@ export interface LedgerOptions {
   readonly lockWaitMs?: number
   /** Rotation size for the event log; tests make it small. */
   readonly eventsRotateBytes?: number
-  /** The rates each interval is priced at; boxd's public EUR rates when absent. */
+  /** The rates current when an interval is counted: the organisation's when known, else boxd's public ones. */
   readonly rates?: () => Rates
   /** The locks' timing; tests make the heartbeat fast. */
   readonly lock?: { readonly heartbeatMs?: number; readonly staleMs?: number }
@@ -93,7 +93,8 @@ export class Ledger {
   /** Every lock this ledger holds, for `dispose`. */
   readonly locks = new LockSet()
   private readonly lockTiming: { readonly heartbeatMs?: number; readonly staleMs?: number }
-  private readonly rates: () => Rates
+  private readonly currentRates: () => Rates
+  private readonly now: () => Date
   private readonly cache = new Map<string, Cached>()
   private indexLoaded = false
   private ledgerId: string | undefined
@@ -107,10 +108,11 @@ export class Ledger {
     this.dir = join(root, LEDGER_PATHS.v1)
     this.lockWaitMs = options.lockWaitMs ?? WORK_LOCK_WAIT_MS
     this.lockTiming = options.lock ?? {}
-    this.rates = options.rates ?? (() => PUBLIC_RATES.EUR)
+    this.currentRates = options.rates ?? (() => PUBLIC_RATES.EUR)
+    this.now = options.now ?? (() => new Date())
     this.events = new EventLog(this.dir, {
       locks: this.locks,
-      ...(options.now ? { now: options.now } : {}),
+      now: this.now,
       ...(options.eventsRotateBytes ? { rotateBytes: options.eventsRotateBytes } : {}),
     })
   }
@@ -337,32 +339,57 @@ export class Ledger {
   }
 
   /**
-   * Counts one phase change into the work's record, under its lock: the interval since the record's last change goes to
-   * the phase that was current before (design §C.4), priced at the rates and with the reading the interval had. A work
-   * with no record, or an event at the same instant and phase, writes nothing. A slot work is charged its share of the
-   * shared machine, so the slot works on one machine add up to that machine once.
+   * Splits the interval of every open slot work on a shared machine at a membership change, so the interval each lived
+   * keeps the share it was priced at and the interval after it takes the new share. One work joining or closing does not
+   * reprice another's past: the open works on the machine, the newcomer included and the leaver excluded, divide it.
    */
-  async countPhase(workId: string, phase: Phase, at: Date, signal?: AbortSignal, reading?: Reading): Promise<void> {
+  async checkpointSlots(machine: MachineName, region: Region | null, at = this.now()): Promise<void> {
+    const open = (await this.list({})).filter((record) => record.state === "open" && record.slot === true && record.machine === machine && record.region === region)
+    if (open.length === 0) return
+    const share = 1 / open.length
+    const rates = this.currentRates()
+    await this.withWorks(
+      open.map((record) => record.workId),
+      async () => {
+        for (const listed of open) {
+          const record = await this.get(listed.workId)
+          if (!record || record.state !== "open" || !record.hours) continue
+          const last = Date.parse(record.hours.at)
+          // A checkpoint before the record's last change cannot rewind it; that change already used the share it had.
+          if (!Number.isNaN(last) && at.getTime() <= last) continue
+          const hours = countHours(record.hours, record.hours.phase, at, { size: record.size, rates, share })
+          if (record.hours.phase === hours.phase && record.hours.at === hours.at && record.hours.share === hours.share) continue
+          await this.write(record.workId, { ...record, hours })
+        }
+      },
+    )
+  }
+
+  /**
+   * Counts one phase change into the work's record, under its lock: the interval since the record's last change goes to
+   * the phase that was current before, at the rates current now (design §C.4). A slot work is charged one divided by the
+   * open works on its shared machine, so the slots on one machine add up to the machine once. A work with no record, or
+   * an event at the same instant and phase, writes nothing.
+   */
+  async countPhase(workId: string, phase: Phase, at: Date, reading?: Reading, signal?: AbortSignal): Promise<void> {
     await this.withWork(
       workId,
       async () => {
         const record = await this.get(workId)
         if (!record) return
-        const share = record.slot ? await this.slotShare(record) : 1
-        const hours = countHours(record.hours, phase, at, { rates: this.rates(), size: record.size, ...(reading ? { reading } : {}), share })
+        const share =
+          record.slot === true ? 1 / Math.max(1, (await this.list({})).filter((open) => open.machine === record.machine && open.region === record.region).length) : 1
+        const hours = countHours(record.hours, phase, at, {
+          size: record.size,
+          rates: this.currentRates(),
+          ...(reading ? { reading } : {}),
+          share,
+        })
         if (record.hours && record.hours.phase === hours.phase && record.hours.at === hours.at) return
         await this.write(workId, { ...record, hours })
       },
       signal,
     )
-  }
-
-  /** The share one slot work is charged: the open works on its machine at this moment. */
-  private async slotShare(record: WorkRecord): Promise<number> {
-    if (!record.machineId) return 1
-    const open = await this.list({})
-    const peers = open.filter((item) => item.state === "open" && item.machineId === record.machineId).length
-    return peers > 0 ? 1 / peers : 1
   }
 
   /**

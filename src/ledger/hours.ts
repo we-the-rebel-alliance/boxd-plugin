@@ -1,28 +1,19 @@
 /**
- * The machine-hours a work's record carries (design §C.4). The ledger counts the interval between two phase changes
- * into `MeteredHours`: the time a machine existed (every phase but `gone` and `closed`), the time it ran (the running
- * phases of `cost/rates.ts`), the time it was asleep, and the money the interval costs at the rates current when it is
- * counted, together with the part of it in the current local day. No boxd call and no owner's sign-in is needed.
+ * The machine time and its cost a work's record carries (design §C.4). The ledger counts the interval between two
+ * phase changes into `MeteredHours`: the time a machine existed (every phase but `gone` and `closed`), the time it ran
+ * (the running phases of `cost/rates.ts`), the time it was asleep, and each in the current local day. The same interval
+ * is priced at `perHour(previous phase, size, last reading, rates)` with the rates current at that change, and a slot
+ * work is charged its share of its shared machine. No boxd call and no owner's sign-in is needed.
  *
  * A read that shows the figure adds the interval from the record's last change to now, without writing: the next phase
- * change counts from that same last change, so no second is counted twice. When that read crosses local midnight, the
- * day that ended is kept as `lastDay`, so the watcher can append that day's cost event after the fact.
+ * change counts from that same last change, so no second or fraction of money is counted twice.
  */
-import { isRunning, money, perHour } from "../cost/rates.js"
-import type { Reading, Rates, Size } from "../ports.js"
-import type { CostSeconds, MeteredDay, MeteredHours, Phase, WorkRecord } from "./types.js"
+import { isRunning, money, perHour, PUBLIC_RATES } from "../cost/rates.js"
+import type { Rates, Reading, Size } from "../ports.js"
+import type { MeteredHours, Phase, WorkRecord } from "./types.js"
 
 /** Phases in which the work's machine exists: every phase but gone and closed. */
 const exists = (phase: Phase) => phase !== "gone" && phase !== "closed"
-
-/** The rates and reading one interval is priced with. */
-export interface Pricing {
-  readonly rates: Rates
-  readonly size?: Size
-  readonly reading?: Reading
-  /** A slot work's share of its shared machine, from 0 to 1; absent is a whole machine. */
-  readonly share?: number
-}
 
 /** `YYYY-MM-DD` in this machine's local day. */
 export function localDay(at: Date): string {
@@ -39,11 +30,17 @@ function startOfDay(at: Date): number {
   return local.getTime()
 }
 
-/** Hours for a number of seconds, to two decimals. */
-export const asHours = (seconds: number) => Math.round((Math.max(seconds, 0) / 3600) * 100) / 100
+/** What prices one counted interval: the work's machine, the last guest reading, the rates and its share of the machine. */
+export interface HoursFacts {
+  readonly size: Size
+  readonly rates: Rates
+  readonly reading?: Reading
+  readonly share?: number
+}
 
-/** The counters of a record with no phase change yet: zeros, with the day's rates when they are known. */
-function zeroHours(phase: Phase, at: Date, pricing: Pricing | undefined): MeteredHours {
+/** The counters before the first phase change: nothing counted yet, in the current rates' currency. */
+function zero(phase: Phase, at: Date, facts: HoursFacts): MeteredHours {
+  const share = facts.share ?? 1
   return {
     existedSeconds: 0,
     runningSeconds: 0,
@@ -53,88 +50,58 @@ function zeroHours(phase: Phase, at: Date, pricing: Pricing | undefined): Metere
     todayAsleepSeconds: 0,
     cost: 0,
     todayCost: 0,
-    ...(pricing ? { currency: pricing.rates.currency, ratesSource: pricing.rates.source } : {}),
+    currency: facts.rates.currency,
+    ratesSource: facts.rates.source,
+    ...(facts.reading ? { reading: facts.reading } : {}),
+    share,
     day: localDay(at),
     phase,
     at: at.toISOString(),
   }
 }
 
-/** The seconds of `previous`'s current day, before an interval is added. */
-function daySeconds(hours: MeteredHours): CostSeconds {
-  return { existed: hours.todayExistedSeconds, running: hours.todayRunningSeconds, asleep: hours.todayAsleepSeconds ?? 0 }
-}
-
-/** The first instant of a `YYYY-MM-DD` local day. */
-function startOf(day: string): number {
-  const [year, month, date] = day.split("-").map(Number)
-  return startOfDay(new Date(year ?? 1970, (month ?? 1) - 1, date ?? 1))
-}
-
-/** The local day after a `YYYY-MM-DD` day. */
-function nextDay(day: string): string {
-  const next = new Date(startOf(day))
-  next.setDate(next.getDate() + 1)
-  return localDay(next)
-}
-
-/** Adds a number of seconds to one day's counters. */
-function addSeconds(seconds: CostSeconds, phase: Phase, elapsed: number): CostSeconds {
-  return {
-    existed: seconds.existed + (exists(phase) ? elapsed : 0),
-    running: seconds.running + (isRunning(phase) ? elapsed : 0),
-    asleep: seconds.asleep + (phase === "asleep" ? elapsed : 0),
-  }
-}
-
 /**
- * One record's counters, counted to `phase` at `at`: the elapsed interval goes to the phase that was current before.
- * With `pricing`, the interval is also priced at those rates into `cost` and `todayCost`; a currency change starts the
- * money counters again in the new currency. When the interval crosses local midnight, the day that ended becomes
- * `lastDay`, with the part of the interval before midnight added to it.
+ * One record's counters, counted to `phase` at `at`: the elapsed interval goes to the phase that was current before,
+ * at the rates current now. A currency change starts `cost` and `todayCost` again in the new currency rather than adding
+ * two currencies. A record from before money was counted keeps its seconds and starts its money at this interval.
  */
-export function countHours(previous: MeteredHours | undefined, phase: Phase, at: Date, pricing?: Pricing): MeteredHours {
+export function countHours(previous: MeteredHours | undefined, phase: Phase, at: Date, facts: HoursFacts): MeteredHours {
   const now = at.getTime()
   const day = localDay(at)
-  if (!previous) return zeroHours(phase, at, pricing)
+  if (!previous) return zero(phase, at, facts)
   const last = Date.parse(previous.at)
   const start = Number.isNaN(last) ? now : Math.min(last, now)
   const elapsed = Math.max(0, now - start) / 1000
   // A gap that crosses local midnight counts only its part after midnight into today's counters; the cumulative
   // counters keep the whole interval.
-  const midnight = startOfDay(at)
-  const today = Math.max(0, now - Math.max(start, midnight)) / 1000
-  const before = Math.max(0, Math.min(midnight, now) - start) / 1000
+  const today = Math.max(0, now - Math.max(start, startOfDay(at))) / 1000
   const sameDay = previous.day === day
-  const previousAsleep = previous.asleepSeconds ?? 0
-  const previousTodayAsleep = previous.todayAsleepSeconds ?? 0
-  const rates = pricing?.rates
-  const hourRate = pricing && rates ? perHour(previous.phase, pricing.size ?? "2x8", pricing.reading, rates) * (pricing.share ?? 1) : undefined
-  const sameCurrency = rates === undefined || previous.currency === undefined || previous.currency === rates.currency
-  let lastDay = previous.lastDay
-  if (!sameDay) {
-    lastDay = {
-      day: previous.day,
-      seconds: addSeconds(daySeconds(previous), previous.phase, before),
-      amount: money((sameCurrency ? (previous.todayCost ?? 0) : 0) + (hourRate ?? 0) * (before / 3600)),
-      currency: rates?.currency ?? previous.currency ?? "EUR",
-      ratesSource: rates?.source ?? previous.ratesSource ?? "public",
-    }
-  }
-  const cost = hourRate === undefined ? (previous.cost ?? 0) : (sameCurrency ? (previous.cost ?? 0) : 0) + hourRate * (elapsed / 3600)
-  const todayBase = sameDay && sameCurrency ? (previous.todayCost ?? 0) : 0
-  const todayCost = hourRate === undefined ? (sameDay ? (previous.todayCost ?? 0) : 0) : todayBase + hourRate * ((sameDay ? elapsed : today) / 3600)
+  const sameCurrency = (previous.currency ?? facts.rates.currency) === facts.rates.currency
+  // The interval was lived at the share recorded when it began; a membership change checkpoints the interval there and
+  // records the new share for what follows (`Ledger.checkpointSlots`).
+  const share = previous.share ?? facts.share ?? 1
+  const nextShare = facts.share ?? share
+  const reading = facts.reading ?? previous.reading
+  const hour = perHour(previous.phase, facts.size, reading, facts.rates)
+  const intervalCost = (elapsed / 3600) * hour * share
+  const todayIntervalCost = (today / 3600) * hour * share
+  // Another currency starts the money counters again, rather than adding two currencies. An interval that costs
+  // nothing (gone, or no elapsed time) leaves the recorded money, its currency and its source as they were.
+  const priced = intervalCost > 0 || todayIntervalCost > 0
+  const switched = priced && !sameCurrency
   return {
     existedSeconds: previous.existedSeconds + (exists(previous.phase) ? elapsed : 0),
     runningSeconds: previous.runningSeconds + (isRunning(previous.phase) ? elapsed : 0),
-    asleepSeconds: previousAsleep + (previous.phase === "asleep" ? elapsed : 0),
+    asleepSeconds: (previous.asleepSeconds ?? 0) + (previous.phase === "asleep" ? elapsed : 0),
     todayExistedSeconds: (sameDay ? previous.todayExistedSeconds : 0) + (exists(previous.phase) ? today : 0),
     todayRunningSeconds: (sameDay ? previous.todayRunningSeconds : 0) + (isRunning(previous.phase) ? today : 0),
-    todayAsleepSeconds: (sameDay ? previousTodayAsleep : 0) + (previous.phase === "asleep" ? today : 0),
-    cost: money(cost),
-    todayCost: money(todayCost),
-    ...(rates ? { currency: rates.currency, ratesSource: rates.source } : previous.currency ? { currency: previous.currency, ...(previous.ratesSource ? { ratesSource: previous.ratesSource } : {}) } : {}),
-    ...(lastDay ? { lastDay } : {}),
+    todayAsleepSeconds: (sameDay ? (previous.todayAsleepSeconds ?? 0) : 0) + (previous.phase === "asleep" ? today : 0),
+    cost: switched ? intervalCost : (previous.cost ?? 0) + intervalCost,
+    todayCost: switched ? todayIntervalCost : (sameDay ? (previous.todayCost ?? 0) : 0) + todayIntervalCost,
+    currency: priced ? facts.rates.currency : (previous.currency ?? facts.rates.currency),
+    ratesSource: priced ? facts.rates.source : (previous.ratesSource ?? facts.rates.source),
+    ...(reading ? { reading } : {}),
+    share: nextShare,
     day,
     phase,
     at: at.toISOString(),
@@ -142,46 +109,33 @@ export function countHours(previous: MeteredHours | undefined, phase: Phase, at:
 }
 
 /**
- * The local days before `at` that the record's last change covers, from its own day to yesterday, split at every local
- * midnight and priced. A work that stayed in one phase for days therefore still has one figure for each day. The
- * caller's once-only marker drops any day already reported.
- */
-export function endedDays(hours: MeteredHours, at: Date, pricing: Pricing): MeteredDay[] {
-  const today = localDay(at)
-  const rate = pricing.rates
-  const hourRate = perHour(hours.phase, pricing.size ?? "2x8", pricing.reading, rate) * (pricing.share ?? 1)
-  const last = Date.parse(hours.at)
-  const start = Number.isNaN(last) ? at.getTime() : Math.min(last, at.getTime())
-  const days: MeteredDay[] = []
-  for (let day = hours.day; day < today; day = nextDay(day)) {
-    const from = Math.max(start, startOf(day))
-    const end = new Date(startOf(day))
-    end.setDate(end.getDate() + 1)
-    const elapsed = Math.max(0, end.getTime() - from) / 1000
-    const own = day === hours.day
-    const seconds = addSeconds(own ? daySeconds(hours) : { existed: 0, running: 0, asleep: 0 }, hours.phase, elapsed)
-    const base = own ? (hours.todayCost ?? 0) : 0
-    days.push({
-      day,
-      seconds,
-      amount: money(base + hourRate * (elapsed / 3600)),
-      currency: own ? (hours.currency ?? rate.currency) : rate.currency,
-      ratesSource: own ? (hours.ratesSource ?? rate.source) : rate.source,
-    })
-  }
-  return days
-}
-
-/**
  * The counters as they read now: the record's last change plus the interval since, with no write. A closed work stops
- * at its close even when no closed event was recorded; a record with no counters reads zero. With `pricing`, the
- * interval since the last change is priced too, and a crossing of local midnight keeps the day that ended in `lastDay`.
+ * at its close even when no closed event was recorded; a record with no counters reads zero.
  */
-export function hoursAt(record: Pick<WorkRecord, "hours" | "state" | "closed">, now: Date, pricing?: Pricing): MeteredHours {
-  if (!record.hours) return zeroHours(record.state === "closed" ? "closed" : "creating", now, pricing)
+export function hoursAt(record: Pick<WorkRecord, "hours" | "state" | "closed" | "size">, now: Date, rates: Rates = PUBLIC_RATES.EUR): MeteredHours {
+  if (!record.hours) {
+    const facts = { size: record.size, rates }
+    return zero(record.state === "closed" ? "closed" : "creating", now, facts)
+  }
   const until = record.state === "closed" && record.closed && record.hours.phase !== "closed" ? new Date(record.closed.at) : now
-  return countHours(record.hours, record.hours.phase, until, pricing)
+  return countHours(record.hours, record.hours.phase, until, {
+    size: record.size,
+    rates,
+    ...(record.hours.reading ? { reading: record.hours.reading } : {}),
+    ...(record.hours.share !== undefined ? { share: record.hours.share } : {}),
+  })
 }
 
-/** The displayed hours: `existed` and `running`, in hours to two decimals. */
-export const shownHours = (hours: MeteredHours) => ({ existed: asHours(hours.existedSeconds), running: asHours(hours.runningSeconds) })
+/** The displayed seconds and estimate: whole machine-seconds and money to four decimals. */
+export const shownWorkHours = (hours: MeteredHours) => ({
+  seconds: {
+    existed: Math.round(Math.max(0, hours.existedSeconds)),
+    running: Math.round(Math.max(0, hours.runningSeconds)),
+    asleep: Math.round(Math.max(0, hours.asleepSeconds ?? 0)),
+  },
+  estimate: {
+    amount: money(Math.max(0, hours.cost ?? 0)),
+    currency: hours.currency ?? PUBLIC_RATES.EUR.currency,
+    ratesSource: hours.ratesSource ?? PUBLIC_RATES.EUR.source,
+  },
+})

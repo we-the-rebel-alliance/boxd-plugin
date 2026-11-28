@@ -25,7 +25,6 @@ import { checkHost } from "./host-version.js"
 import { createLedger } from "./ledger/index.js"
 import { manifest, VERSION } from "./manifest.js"
 import { parseOptions } from "./options.js"
-import type { Rates } from "./ports.js"
 import { createProvider, type ProviderOptions } from "./provider/index.js"
 import { stopAll, type CoreServices, type CostServices, type Dispose, type FleetServices, type HostServices } from "./services.js"
 import { readSkills, registerSkills } from "./skills.js"
@@ -73,16 +72,15 @@ export function createBoxdPlugin(seam: BoxdSeam = {}) {
         report,
       }
       const provider = createProvider({ boxdBin: seam.boxdBin, opencodeBin: seam.opencodeBin, helperPath: seam.helperPath })
-      // The ledger prices each interval at the rates the cost service knows; the cost service is built after the
-      // watcher, so the closure reads the latest function once it exists.
-      let ratesOf: () => Rates = () => PUBLIC_RATES.EUR
-      const core: CoreServices = { ...hostServices, ...provider, ledger: createLedger({ ...hostServices, ...provider }, { rates: () => ratesOf() }) }
+      // Every phase change prices its interval at the rates current then: the cost service answers once it is built.
+      let currentRates = () => PUBLIC_RATES.EUR
+      const core: CoreServices = { ...hostServices, ...provider, ledger: createLedger({ ...hostServices, ...provider, rates: () => currentRates() }) }
       // The watcher starts before the one registration exists, so its nudge is wired to the bus just after it.
       let nudge: (() => Promise<void>) | undefined
-      const watcher = createWatch(core, { changed: () => nudge?.(), rates: () => ratesOf() })
-      const fleetCost = createCost({ ...core, watch: watcher.watch })
-      ratesOf = internalsOf(fleetCost).rates
-      const fleet: FleetServices = { ...core, watch: watcher.watch, cost: fleetCost }
+      const watcher = createWatch(core, { changed: () => nudge?.(), rates: () => currentRates() })
+      const costService = createCost({ ...core, watch: watcher.watch })
+      currentRates = internalsOf(costService).rates
+      const fleet: FleetServices = { ...core, watch: watcher.watch, cost: costService }
       const source: SourceDeps = { ledger: core.ledger, identity: machineIdentity, now: () => hostServices.clock.now() }
       const { runs, selectors, actions } = createRuns(fleet)
       const cost: CostServices = { ...fleet, actions }

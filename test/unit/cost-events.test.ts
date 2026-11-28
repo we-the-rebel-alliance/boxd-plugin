@@ -24,7 +24,6 @@ describe("cost events", () => {
     const w = world
     w.clock.now = new Date(2026, 10, 16, 23, 0, 0)
     await w.work("old")
-    await w.record("old", (record) => ({ ...record, labels: { product: "widgets", role: "lane", task: "boxd-plugin/132" } }))
     await w.watcher.tick()
     w.clock.now = new Date(2026, 10, 16, 23, 59, 0)
     await w.watcher.tick()
@@ -39,7 +38,6 @@ describe("cost events", () => {
     expect(first[0]!.cost!.currency).toBe("EUR")
     expect(first[0]!.cost!.ratesSource).toBe("public")
     expect(first[0]!.cost!.amount).toBeGreaterThan(0)
-    expect(first[0]!.labels).toEqual({ product: "widgets", role: "lane", task: "boxd-plugin/132" })
 
     // A second tick that day, and a restart on the same ledger, write no second day event.
     await w.watcher.tick()
@@ -77,7 +75,6 @@ describe("cost events", () => {
     await Promise.all([w.watcher.tick(), other.tick()])
     const events = await costEvents(w)
     expect(events).toHaveLength(1)
-    expect(events[0]!.labels).toBeUndefined()
     await other.dispose()
   }, 60_000)
 
@@ -105,7 +102,7 @@ describe("cost events", () => {
     await again.dispose()
   }, 60_000)
 
-  test("eventOf names a cost event's day, seconds, amount and rates, and its product labels when the record holds them", () => {
+  test("eventOf names a cost event's day, seconds, amount and rates", () => {
     const cost = {
       day: "2026-11-27",
       seconds: { existed: 40_000, running: 11_160, asleep: 3_600 },
@@ -113,7 +110,7 @@ describe("cost events", () => {
       currency: "EUR",
       ratesSource: "public" as const,
     }
-    const event: WorkEvent = { seq: 9, at: "2026-11-28T00:01:00.000Z", workId: "w1", from: "idle", to: "idle", cost, labels: { product: "widgets", role: "lane", task: "boxd-plugin/132" } }
+    const event: WorkEvent = { seq: 9, at: "2026-11-28T00:01:00.000Z", workId: "w1", from: "idle", to: "idle", cost }
     expect(titleOf(event)).toBe("Work w1 cost EUR 0.42 on 2026-11-27, 3.1 running hours")
     expect(eventOf(event).labels).toEqual([
       "cost:2026-11-27",
@@ -122,13 +119,8 @@ describe("cost events", () => {
       "amount:0.42",
       "currency:EUR",
       "rates:public",
-      "product:widgets",
-      "role:lane",
-      "task:boxd-plugin/132",
       "phase:idle",
     ])
-    const without = eventOf({ ...event, labels: undefined })
-    expect(without.labels).not.toContain("product:widgets")
     expect(titleOf({ ...event, cost: { ...cost, day: "life", seconds: { ...cost.seconds, running: 7_200 }, amount: 1.2 } })).toBe("Work w1 cost EUR 1.20 over its life, 2.0 running hours")
     expect(PUBLIC_RATES.EUR.currency).toBe("EUR")
   })

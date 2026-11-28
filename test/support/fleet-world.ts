@@ -103,7 +103,7 @@ export async function startWorld(
     },
   }
   let ratesOf: () => Rates = () => PUBLIC_RATES.EUR
-  const ledger = createLedger({ ...host, ...runtime }, { rates: () => ratesOf() })
+  const ledger = createLedger({ ...host, ...runtime, rates: () => ratesOf() })
   const core: CoreServices = { ...host, ...runtime, ledger }
   const watcher = createWatch(core, { autoStart: false, rates: () => ratesOf(), ...(options.changed ? { changed: options.changed } : {}) })
   const cost = options.cost === "real" ? createCost({ ...core, watch: watcher.watch }) : (options.cost ?? notBuilt<CostPort>("cost"))

@@ -12,7 +12,7 @@ import { open, rename, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { boxdError, isCode } from "../errors.js"
 import type { EventPage, WorkEventCost } from "../ports.js"
-import { EVENTS_ROTATE_BYTES, type EventLine, type WorkLabels } from "./types.js"
+import { EVENTS_ROTATE_BYTES, type EventLine } from "./types.js"
 import { errnoOf, FILE_MODE } from "./fsx.js"
 import { acquireLock, type LockSet } from "./lock.js"
 
@@ -70,7 +70,6 @@ export class EventLog {
         ...(event.readySeconds !== undefined && Number.isSafeInteger(event.readySeconds) && event.readySeconds >= 0 ? { readySeconds: event.readySeconds } : {}),
         ...(event.reading !== undefined ? { reading: { residentGiB: event.reading.residentGiB, load1: event.reading.load1 } } : {}),
         ...(event.cost !== undefined ? { cost: cleanCost(event.cost) } : {}),
-        ...(event.labels !== undefined ? { labels: cleanLabels(event.labels) } : {}),
       }
       // The fence: a sequence number is handed out only while this process still holds the log's lock.
       if (!(await lock.holds())) throw boxdError(this.locks?.disposed ? "CANCELLED" : "LEDGER_LOCKED", "The event log's lock was lost before the append, so nothing was written.")
@@ -205,7 +204,6 @@ const parseSeq = (text: string): number | undefined => {
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 const CURRENCY = /^[A-Z]{3}$/
-const WORK_LABELS = new Set(["product", "role", "feature", "task"])
 const whole = (value: number) => (Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0)
 const amount = (value: number) => (Number.isFinite(value) ? Math.max(0, Math.round(value * 10_000) / 10_000) : 0)
 
@@ -220,17 +218,6 @@ function cleanCost(cost: WorkEventCost): WorkEventCost | undefined {
     currency: cost.currency,
     ratesSource: cost.ratesSource,
   }
-}
-
-/** A work's labels, filtered to the four the plugin uses and cut to a label value's length. */
-function cleanLabels(labels: WorkLabels): WorkLabels | undefined {
-  const clean: Record<string, string> = {}
-  for (const [key, value] of Object.entries(labels)) {
-    if (!WORK_LABELS.has(key) || typeof value !== "string") continue
-    const text = value.trim().slice(0, 64)
-    if (text) clean[key] = text
-  }
-  return Object.keys(clean).length ? (clean as WorkLabels) : undefined
 }
 
 /**

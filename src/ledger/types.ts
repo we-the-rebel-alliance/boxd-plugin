@@ -15,34 +15,8 @@
  * - **Remotes** are stored without their userinfo.
  * - The folder is 0700 and its files 0600.
  */
-import type { Delivery, DoneReport, MachineId, MachineName, Region, RunOutcome, Size, WorkEvent } from "../ports.js"
+import type { Delivery, DoneReport, MachineId, MachineName, Rates, Reading, Region, RunOutcome, Size, WorkEvent } from "../ports.js"
 import type { WarningCode } from "../errors.js"
-
-/** What a work is for: the labels a coordinator passes to `ensure` (#125). */
-export interface WorkLabels {
-  readonly product?: string
-  readonly role?: string
-  readonly feature?: string
-  readonly task?: string
-}
-
-/** Machine time by boxd's billing state, in seconds. */
-export interface CostSeconds {
-  readonly existed: number
-  readonly running: number
-  readonly asleep: number
-}
-
-/** One local day's priced machine time, kept so the day's cost event can report it after midnight. */
-export interface MeteredDay {
-  /** `YYYY-MM-DD` in this machine's local day. */
-  readonly day: string
-  readonly seconds: CostSeconds
-  /** Estimated cost in `currency`, at `ratesSource`'s rates, to 4 decimals. */
-  readonly amount: number
-  readonly currency: string
-  readonly ratesSource: "usage" | "public"
-}
 
 export const LEDGER_FORMAT = 1
 
@@ -138,36 +112,55 @@ export interface WorkWarning {
 }
 
 /**
- * The machine time the ledger has counted for one work, in seconds, counted to `at`. The watcher adds the interval since
+ * The machine time and money the ledger has counted for one work, counted to `at`. The watcher adds the interval since
  * the last change whenever a phase changes: `existedSeconds` for every phase but `gone` and `closed`,
- * `runningSeconds` for the running phases (`RUNNING_PHASES`), and `asleepSeconds` for `asleep` only. Each interval is
- * priced at the rates current when it is counted, into `cost`; the `today*` counters and `todayCost` cover `day`, the
- * local day, so a budget can read today's figures without an owner's sign-in. `lastDay` keeps the day that ended, for
- * the day's cost event after midnight.
+ * `runningSeconds` for the running phases (`RUNNING_PHASES`), and `asleepSeconds` for `asleep`. The `today*` counters
+ * cover `day`, the local day. Each interval is priced at the rates current at that change, and `cost` is in `currency`;
+ * a change of currency starts the money counters again. `reading` and `share` price and split the interval after `at`.
  */
 export interface MeteredHours {
   readonly existedSeconds: number
   readonly runningSeconds: number
-  /** Absent on a record written before the field existed. */
-  readonly asleepSeconds?: number
+  readonly asleepSeconds: number
   readonly todayExistedSeconds: number
   readonly todayRunningSeconds: number
-  readonly todayAsleepSeconds?: number
-  /** The work's estimated cost over its life, in `currency`, at `ratesSource`'s rates. */
-  readonly cost?: number
-  /** The part of `cost` in `day`, the local day. */
-  readonly todayCost?: number
-  /** The currency `cost` and `todayCost` are in. */
-  readonly currency?: string
-  readonly ratesSource?: "usage" | "public"
-  /** The day before the current one, once a phase change has rolled over local midnight, so its cost event can be written. */
-  readonly lastDay?: MeteredDay
+  readonly todayAsleepSeconds: number
+  /** The estimate for the whole work, in `currency`, at each interval's rates. */
+  readonly cost: number
+  /** The part of `cost` since local midnight. */
+  readonly todayCost: number
+  /** The currency `cost` is in; a later interval in another currency starts `cost` again in that one. */
+  readonly currency: string
+  /** Whose rates the estimate used: the organisation's, or boxd's public ones. */
+  readonly ratesSource: Rates["source"]
+  /** The last guest reading, which prices the interval after `at`. */
+  readonly reading?: Reading
+  /** The share of its machine the interval after `at` is charged: one divided by the open works on it; 1 for its own machine. */
+  readonly share?: number
   /** `YYYY-MM-DD` in this machine's local day, which the `today*` counters cover. */
   readonly day: string
   /** The phase the counters are counted to. */
   readonly phase: Phase
   /** When the counters were last counted. */
   readonly at: string
+}
+
+/** Machine time by boxd's billing state, in seconds: the figures a cost event carries. */
+export interface CostSeconds {
+  readonly existed: number
+  readonly running: number
+  readonly asleep: number
+}
+
+/** One local day's priced machine time, which the watcher reports as a cost event. */
+export interface MeteredDay {
+  /** `YYYY-MM-DD` in this machine's local day. */
+  readonly day: string
+  readonly seconds: CostSeconds
+  /** Estimated cost in `currency`, at `ratesSource`'s rates, to 4 decimals. */
+  readonly amount: number
+  readonly currency: string
+  readonly ratesSource: Rates["source"]
 }
 
 export interface WorkRecord {
@@ -221,10 +214,8 @@ export interface WorkRecord {
   /** Set when `boxd_ensure({ select: "orphans" })` adopted a machine that no record owned. */
   readonly adopted?: { readonly at: string; readonly from: "orphan" }
   readonly reboots?: ReadonlyArray<{ readonly at: string; readonly why: "agent-silent" | "repair" }>
-  /** The machine-hours the watcher has counted for this work; absent until its first phase change. */
+  /** The machine time and its cost the watcher has counted for this work; absent until its first phase change. */
   readonly hours?: MeteredHours
-  /** The labels a coordinator gave the work (#125), when the record holds them. */
-  readonly labels?: WorkLabels
   /** The local day of the last cost event the watcher wrote, so a restart or a second watcher never writes it twice. */
   readonly costDay?: string
   /** The watcher wrote the work's one life cost event at its close. */

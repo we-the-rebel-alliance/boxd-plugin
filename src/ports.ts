@@ -18,7 +18,7 @@
  *   while waiting for a lock, a golden build, a poll interval or another pool.
  */
 
-import type { IndexEntry, MeteredDay, Phase, SavedState, SleptBy, WorkLabels, WorkRecord } from "./ledger/types.js"
+import type { IndexEntry, MeteredDay, Phase, SavedState, SleptBy, WorkRecord } from "./ledger/types.js"
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -742,8 +742,6 @@ export interface WorkEvent {
    * `to`, so a phase reader is never misled.
    */
   readonly cost?: WorkEventCost
-  /** The work's labels from #125, when the record holds them, so a cost event names its product and task. */
-  readonly labels?: WorkLabels
 }
 
 /** One open work as the watcher last saw it: what the cost estimate and automation read, with no CLI call. */

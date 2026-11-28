@@ -112,8 +112,6 @@ const PHASE_WORDS: Readonly<Record<string, string>> = {
   closed: "it is closed",
 }
 
-const LABEL_ORDER = ["product", "role", "feature", "task"] as const
-
 /** The plugin's own sentence for one change: a cost figure, or the work id, phase, outcome, code and who slept it. */
 export function titleOf(event: WorkEvent): string {
   if (event.cost) {
@@ -177,10 +175,6 @@ export function eventOf(event: WorkEvent): SourceEvent {
             `rates:${event.cost.ratesSource}`,
           ]
         : []),
-      ...LABEL_ORDER.flatMap((key) => {
-        const value = event.labels?.[key]
-        return value ? [`${key}:${value}`] : []
-      }),
       `phase:${event.to}`,
       ...(event.outcome ? [`outcome:${event.outcome}`] : []),
       ...(event.code ? [`code:${event.code}`] : []),
