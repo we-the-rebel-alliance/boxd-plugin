@@ -66,6 +66,24 @@ describe("cost events", () => {
     expect(events[1]!.cost!.seconds).toMatchObject({ existed: 86_400, running: 86_400 })
   }, 60_000)
 
+  test("a tick after the day is written writes nothing and does not nudge changed", async () => {
+    let nudges = 0
+    world = await startWorld({ changed: () => { nudges += 1 } })
+    const w = world
+    w.clock.now = new Date(2026, 10, 16, 23, 0, 0)
+    await w.work("quiet")
+    await w.watcher.tick()
+    w.clock.now = new Date(2026, 10, 17, 0, 1, 0)
+    await w.watcher.tick()
+    expect(await costEvents(w)).toHaveLength(1)
+
+    nudges = 0
+    w.clock.now = new Date(2026, 10, 17, 0, 2, 0)
+    await w.watcher.tick()
+    expect(await costEvents(w)).toHaveLength(1)
+    expect(nudges).toBe(0)
+  }, 60_000)
+
   test("two watchers on one ledger write one day event between them", async () => {
     world = await startWorld()
     const w = world

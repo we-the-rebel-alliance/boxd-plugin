@@ -335,8 +335,8 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
     const phase = record.state === "closed" ? "closed" : (logged.get(record.workId)?.phase ?? record.hours?.phase ?? phaseNow(record))
     const labels = record.labels && Object.keys(record.labels).length > 0 ? { labels: record.labels } : {}
     try {
-      await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost, ...labels }, cost.day === "life" ? "life" : "day", cost.day, op)
-      return 1
+      const line = await core.ledger.appendEventOnce({ at, workId: record.workId, from: phase, to: phase, cost, ...labels }, cost.day === "life" ? "life" : "day", cost.day, op)
+      return line === undefined ? 0 : 1
     } catch (error) {
       if (!abort.signal.aborted) core.report("watch", `The watcher could not write ${record.workId}'s cost event: ${reasonOf(error)}.`)
       return 0
@@ -359,7 +359,9 @@ export function createWatch(core: CoreServices, options: WatchOptions = {}): Wat
         const pricing = { rates: rate, size: record.size, ...(reading ? { reading } : {}) }
         const days = endedDays(record.hours, at, pricing)
         const created = localDay(new Date(record.createdAt))
-        for (const day of days.filter((entry) => entry.day < today && entry.day >= created).sort((a, b) => a.day.localeCompare(b.day))) {
+        for (const day of days
+          .filter((entry) => entry.day < today && entry.day >= created && (record.costDay === undefined || entry.day > record.costDay))
+          .sort((a, b) => a.day.localeCompare(b.day))) {
           wrote += await appendCost(record, day, op)
         }
         continue
