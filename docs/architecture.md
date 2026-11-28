@@ -40,13 +40,27 @@ label. A shared machine carries `shared=<name>` instead of `work=<id>`, and ever
 id; the ledger label is still its operator's. The label lets one operator tell another operator's live work from a
 machine that no work owns, because a ledger lives on its operator's machine.
 
+## The registry machine
+
+A ledger lives on its operator's machine, so it keeps a durable copy on a registry machine in the organisation:
+`oc-reg-<ledgerId>`. The machine is made on first need, in the region of the ledger's first work, with the labels
+`owner=boxd`, `role=registry` and `ledger=<ledgerId>`, scheduled disk backups on (`backups.period 24h`) and
+auto-hibernate left on. The automation owner's sweep copies every record, export, patch, `untracked/` folder and the
+`ledger-id` file that changed since the last copy, by digest, and never the locks. No tool call waits for the copy.
+`boxd_ensure({ select: "registry" })` restores a ledger from it.
+
+`/boxd` and `status` show the registry's machine, the time of the last complete copy, the works it holds, and a warning
+when the copy is more than one sweep behind or failed. The registry is its own machine class: it is never an orphan,
+never adoptable, and never counted against `budget.machines`.
+
 ## Machine classes and orphans
 
 The fleet status classifies every machine in the organisation: a work in this ledger, a work in another ledger (its
 `ledger=` label is not this ledger's id), a kept machine (it matches a selector in the `keep` option), a golden builder,
-or an orphan. An orphan also says why it has no owner: no ledger label, this ledger's label without a record, or only the
-plugin's legacy labels. Only a session machine is actionable: `role=session`, or an `oc-<id>` name with the legacy
-labels. Any other orphan is listed with the next step "label it, or add a selector to keep", and no rule ever acts on it.
+the registry, or an orphan. An orphan also says why it has no owner: no ledger label, this ledger's label without a
+record, or only the plugin's legacy labels. Only a session machine is actionable: `role=session`, or an `oc-<id>` name
+with the legacy labels. Any other orphan is listed with the next step "label it, or add a selector to keep", and no rule
+ever acts on it.
 
 `boxd_ensure({ select: "orphans" })` adopts every actionable orphan: it reads the guest's `describe`, writes a record
 from the machine's own folder, repository and root session, and sets this ledger's labels. It changes nothing on the

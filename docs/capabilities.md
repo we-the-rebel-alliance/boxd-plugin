@@ -95,8 +95,17 @@ None.
   a slot on a shared machine records them in the ledger only. A rebuild through `boxd_resume` keeps them on the new
   machine. `boxd_job` and the status works list return them, and an adopted orphan's `work.*` labels are read back into
   its record.
+- **The registry.** The ledger keeps a durable copy on the registry machine `oc-reg-<ledgerId>`, labelled
+  `role=registry`. `boxd_ensure({ select: "registry" })` restores a ledger from it, on a ledger with no records: it
+  finds the organisation's registry machines, uses `ledger: "<id>"` to choose when there are several and refuses with
+  the list when the choice is ambiguous, wakes the one it restores from, copies its ledger down, checks every file's
+  digest, takes its id as this ledger's id, and writes the records, exports and patches through the ledger's
+  copy-on-write writes. It then adopts this ledger's no-record orphans, the works made after the last copy, as
+  `select: "orphans"` does, and `dryRun` lists what it would restore and adopt. A ledger that already has records is
+  refused and nothing changes: run it on an empty ledger. `/boxd` and `status` show the registry's machine, the time of
+  the last complete copy, the works it holds, and a warning when the copy is behind or failed.
 - **Orphans.** The fleet status classifies every machine as a work here, another ledger's work, kept by a `keep` selector,
-  a golden builder, or an orphan with its reason and whether the plugin may act on it. `ensure` with
+  a golden builder, the registry, or an orphan with its reason and whether the plugin may act on it. `ensure` with
   `{ select: "orphans" }` adopts every actionable orphan: it reads the guest's `describe`, writes a record and sets this
   ledger's labels, without setup, clone, upgrade or resize. A busy or waiting orphan is adopted and left running; a
   hibernated orphan is woken for the read and left running. One whose `describe` fails is skipped with its error.
@@ -122,6 +131,7 @@ ledger:
 | a work in another ledger | its `ledger=` label names a ledger other than this one |
 | kept | it matches a selector in the `keep` option |
 | a golden builder | its `role` is `golden-builder`, or its name starts with `oc-gb-` |
+| the registry | its `role` is `registry`; it holds the ledger's durable copy, and it is never an orphan, never adoptable, and never counted against `budget.machines` |
 | an orphan | none of the above |
 
 Each orphan carries its region, status, why and whether the plugin may act on it. The why is one of "no ledger label",
